@@ -1,0 +1,110 @@
+################################################################################
+#
+# This workflow is used to provision new users in Namespaces during user setup. 
+# The namespace configuration requires the Keycloak Group to have been created
+# and the permissions for the group set.
+#
+# Inputs:
+#   direktivurl: Direktiv URL, with the /auth realm appended to access the Keycloak API
+#   namespace: Namespace to provision
+#
+# Secrets:
+#   DIREKTIV_ADMIN_TOKEN: The Direktiv Admin token, only available during install:
+#   kubectl get secret direktiv-secrets-api -o json | jq -r ".data.adminkey" | base64 --decode
+#
+#
+
+description: This workflows creates the namespace and permissions
+
+#
+# The start definition which starts the worklfow based on the event received from the
+# user provisionong workflow. Event will contain the following information:
+#   direktivurl: Direktiv URL
+#   namespace: Group to be created in Keycloak and Direktiv
+#
+start:
+  type: event
+  state: create-direktiv-namespace
+  event: 
+    type: com.direktiv.namespace.create
+
+functions:
+- id: get-request
+  image: direktiv/request:latest
+  type: knative-workflow
+
+states:
+  # The first state will create the namespace based on the event input
+  - id: create-direktiv-namespace
+    type: action
+    action:
+      function: get-request
+      secrets: ["DIREKTIV_ADMIN_TOKEN"]
+      input: 
+        method: "PUT"
+        url: 'jq(."com.direktiv.namespace.create".data.direktivurl)/api/namespaces/jq(."com.direktiv.namespace.create".data.namespace)'  
+        headers:
+          "direktiv-token": jq(.secrets.DIREKTIV_ADMIN_TOKEN)
+        insecureSkipVerify: true
+    catch:
+      - error: "*"
+        transition: generate-error-event
+    transition: namespace-assign-permissions
+
+  - id: namespace-assign-permissions
+    type: action
+    action:
+      function: get-request
+      secrets: ["DIREKTIV_ADMIN_TOKEN"]
+      input: 
+        method: "POST"
+        url: 'jq(."com.direktiv.namespace.create".data.direktivurl)/api/namespaces/jq(."com.direktiv.namespace.create".data.namespace)/auth/permissions?opt=set'  
+        headers:
+          "direktiv-token": jq(.secrets.DIREKTIV_ADMIN_TOKEN)
+        body:
+          "group": jq(."com.direktiv.namespace.create".data.namespace)
+          "policies": ["viewNamespace","listServices","deleteNamespace","getNode","mkdir","createWorkflow","updateWorkflow","deleteWorkflow","deleteNode","getWorkflow","deleteRevision","tag","untag","validateRef","validateRouter","sendNamespaceEvent","listSecrets","createSecret","deleteSecret","listRegistries","createRegistry","deleteRegistry","executeWorkflow","listInstances","getInstance","cancelInstance","createAttribute","deleteAttribute","listInstanceVariables","getInstanceVariable","setInstanceVariable","listWorkflowVariables","getWorkflowVariable","setWorkflowVariable","listNamespaceVariables","getNamespaceVariable","setNamespaceVariable","getNamespaceLogs","getWorkflowLogs","getInstanceLogs","watchPods","watchLogs","listPods","deleteService","getService","createService","updateService","getGroups","getGroupPermissions","setGroupPermissions","getPoliciesFile","editPoliciesFile","createAuthToken","namespaceOwner","getMetrics","listWorkflowServices","getEventHistory","getEventListeners","deleteWorkflowService"]
+        insecureSkipVerify: true
+    catch:
+      - error: "*"
+        transition: generate-error-event
+    transition: namespace-generate-token
+
+  - id: namespace-generate-token
+    type: action
+    action:
+      function: get-request
+      secrets: ["DIREKTIV_ADMIN_TOKEN"]
+      input: 
+        method: "POST"
+        url: 'jq(."com.direktiv.namespace.create".data.direktivurl)/api/namespaces/jq(."com.direktiv.namespace.create".data.namespace)/auth/token'  
+        headers:
+          "direktiv-token": jq(.secrets.DIREKTIV_ADMIN_TOKEN)
+        body:
+          "description": 'jq(."com.direktiv.namespace.create".data.namespace) token generated during provisioning'
+          "expires": "P3Y"
+          "policies": ["viewNamespace","listServices","deleteNamespace","getNode","mkdir","createWorkflow","updateWorkflow","deleteWorkflow","deleteNode","getWorkflow","deleteRevision","tag","untag","validateRef","validateRouter","sendNamespaceEvent","listSecrets","createSecret","deleteSecret","listRegistries","createRegistry","deleteRegistry","executeWorkflow","listInstances","getInstance","cancelInstance","createAttribute","deleteAttribute","listInstanceVariables","getInstanceVariable","setInstanceVariable","listWorkflowVariables","getWorkflowVariable","setWorkflowVariable","listNamespaceVariables","getNamespaceVariable","setNamespaceVariable","getNamespaceLogs","getWorkflowLogs","getInstanceLogs","watchPods","watchLogs","listPods","deleteService","getService","createService","updateService","getGroups","getGroupPermissions","setGroupPermissions","getPoliciesFile","editPoliciesFile","createAuthToken","namespaceOwner","getMetrics","listWorkflowServices","getEventHistory","getEventListeners","deleteWorkflowService"]
+        insecureSkipVerify: true
+    catch:
+      - error: "*"
+        transition: generate-error-event
+    transition: generate-success-event
+    transform: jq(."com.direktiv.namespace.create".data + .return.body)
+
+  # Generate a generic handle error event
+  - id: generate-error-event
+    type: generateEvent
+    log: Create a generic handle error event
+    event: 
+      type: com.direktiv.namespace.error
+      source: direktiv-namespace-setup/create-namespace
+      data: jq(.)
+
+  # Generate a create user success event
+  - id: generate-success-event
+    type: generateEvent
+    log: Generate a create namespace success event
+    event: 
+      type: com.direktiv.namespace.success
+      source: direktiv-namespace-setup/create-namespace
+      data: jq(.)  

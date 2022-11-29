@@ -1,0 +1,138 @@
+################################################################################
+#
+# This workflow is used to provision new namespaces and workflows. The following
+# steps are required to provision a new namespace and supporting components:
+#   1. Create the new namespace based on the workflow input
+#   2. Create a username / password combination in Keycloak
+#   3. Create a group in keycloak
+#   2. Create a token in the new namespace to allow for further namespace actions
+#      and store the token as an internal variable on the workflow level
+#   4. Associate the new username / password with the namespace
+#   5. Clone a set up "standard" workflows for the environment
+#
+# Inputs:
+#   namespace: Namespace to be created
+
+description: The master workflow will create a user/password and group. It will also create the namespace with the approporiate permissions.
+
+states:
+  # make sure all the inputs are set
+  - id: validate-input
+    type: validate
+    schema:
+      title: Setup workflow environment and information
+      type: object
+      required: ["direktivurl", "username", "password", "email", "namespace"]
+      properties:
+        direktivurl:
+          title: Direktiv URL
+          type: string
+          default: "https://dev.direktiv.io"
+        username:
+          title: Username for namespace account
+          type: string
+          default: "wilhelm"
+        password:
+          title: Password for the username
+          type: string
+          default: "password"
+        email:
+          title: Email for the username
+          type: string
+          default: "wilhelm.wonigkeit@direktiv.io"
+        namespace:
+          title: Company name (namespace created)
+          type: string
+          default: "acme"
+    transition: create-user-keycloak
+
+  # Create the new username and password in Keycloak based on the workflow input. The workflow 
+  # assumes that it's run by an administrator and a token has been created with access rights (as "admin")
+  - id: create-user-keycloak
+    type: generateEvent
+    log: Create an event to start user provisioning workflow
+    event: 
+      type: com.direktiv.user.create
+      source: setup-master-workflow
+      data: jq(.)
+    transition: wait-for-user-success
+
+  # This state now waits for the return event from any of the subflows calling the create user
+  # and groups in Keycloak workflows
+  #
+  - id: wait-for-user-success
+    type: eventXor
+    timeout: PT60S
+    events:
+      - transition: create-namespace
+        event:
+          type: com.direktiv.user.success   
+        transform: jq(. = ."com.direktiv.user.success".data)
+      - transition: workflow-failure
+        event:
+          type: com.direktiv.user.error
+
+  # Create the new namespace based on the workflow input. The workflow assumes that it's run by
+  # an administrator and a token has been created with access rights (as "admin")
+  - id: create-namespace
+    type: generateEvent
+    log: Create an event to start namespace provisioning workflow
+    event: 
+      type: com.direktiv.namespace.create
+      source: setup-master-workflow
+      data: jq(.)
+    transition: wait-for-namespace-success
+
+  # This state now waits for the return event from any of the subflows calling the create namespace
+  # and permissions in Direktiv
+  #
+  - id: wait-for-namespace-success
+    type: eventXor
+    timeout: PT60S
+    events:
+      - transition: clone-workflow-examples
+        event:
+          type: com.direktiv.namespace.success   
+        transform: jq(. = ."com.direktiv.namespace.success".data)
+      - transition: workflow-failure
+        event:
+          type: com.direktiv.namespace.error
+
+  # Clone a example repository into the new namespace. This workflow uses the token created
+  # for the namespace as part of the provisioning and NOT the admin token
+  - id: clone-workflow-examples
+    type: generateEvent
+    log: Create an event to start workflow cloning
+    event: 
+      type: com.direktiv.workflow.create
+      source: setup-master-workflow
+      data: jq(.)
+    transition: wait-for-workflow-success
+
+  # This state now waits for the return event from any of the subflows calling the clone
+  # workflow examples
+  #
+  - id: wait-for-workflow-success
+    type: eventXor
+    timeout: PT60S
+    events:
+      - transition: workflow-success
+        event:
+          type: com.direktiv.workflow.success   
+        #transform: jq(. = ."com.direktiv.vault.generate.complete".data)
+      - transition: workflow-failure
+        event:
+          type: com.direktiv.namespace.error
+
+
+  # This is a generic state for printing the failure states
+  #
+  - id: workflow-success
+    type: noop
+    log: 'Success for workflow jq(.)'
+
+  # This is a generic state for printing the failure states
+  #
+  - id: workflow-failure
+    type: noop
+    log: 'Error in the workflow jq(.)'

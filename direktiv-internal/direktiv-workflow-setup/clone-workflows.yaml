@@ -1,0 +1,72 @@
+################################################################################
+#
+# This workflow is used to clone a GitHub repository workflow example. The inputs 
+# to the workflow are:
+#
+# Inputs:
+#   direktivurl: Direktiv URL, with the /auth realm appended to access the Keycloak API
+#   namespace: Namespace to provision
+#   authtoken: Token generated during the namespace provisioning
+#
+
+description: This workflows creates the namespace and permissions
+
+#
+# The start definition which starts the worklfow based on the event received from the
+# user provisionong workflow. Event will contain the following information:
+#   direktivurl: Direktiv URL
+#   namespace: Group to be created in Keycloak and Direktiv
+#   authtoken: Token generated during the namespace provisioning
+#
+start:
+  type: event
+  state: clone-workflow-namespace
+  event: 
+    type: com.direktiv.workflow.create
+
+functions:
+- id: get-request
+  image: direktiv/request:latest
+  type: knative-workflow
+
+states:
+  # The first state will create the namespace based on the event input
+  - id: clone-workflow-namespace
+    type: action
+    action:
+      function: get-request
+      input: 
+        method: "PUT"
+        url: 'jq(."com.direktiv.workflow.create".data.direktivurl)/api/namespaces/jq(."com.direktiv.workflow.create".data.namespace)/tree/examples?op=create-directory'
+        headers:
+          "direktiv-token": jq(."com.direktiv.workflow.create".data.authtoken)
+        body:
+          "url": "https://github.com/direktiv/direktiv-examples.git"
+          "ref": "main"
+          "cron": ""
+          "passphrase": ""
+          "publicKey": ""
+          "privateKey": ""
+        insecureSkipVerify: true
+    catch:
+      - error: "*"
+        transition: generate-error-event
+    transition: generate-success-event
+
+  # Generate a generic handle error event
+  - id: generate-error-event
+    type: generateEvent
+    log: Create a generic handle error event for the workflow cloning
+    event: 
+      type: com.direktiv.workflow.error
+      source: direktiv-workflow-setup/clone-workflows
+      data: jq(.)
+
+  # Generate a create user success event
+  - id: generate-success-event
+    type: generateEvent
+    log: Generate a clone workflow success event
+    event: 
+      type: com.direktiv.workflow.success
+      source: direktiv-workflow-setup/clone-workflows
+      data: jq(.)    

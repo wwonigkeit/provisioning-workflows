@@ -1,0 +1,118 @@
+# Example workflow: 'Running Ansible Dell Playbooks'
+# 
+#
+# This workflow will clone the GitHub repository containing the
+# Ansible playbooks, roles and configurations and run this
+# playbook against a target
+#
+#
+# GitHub Repo: https://github.com/vorteil/terraform-examples.git
+# 
+# Input:
+# { "action": "apply" }
+#
+# or 
+#
+# { "action": "destroy" }
+#
+description: A simple Terraform demo
+
+#
+# Definition for all the functions being used
+functions:
+#
+# The git function is used to clone the terraform scripts maintained in the GitHUb repository,
+# which can be AWS, GCP or Azure (note these are just generic Terraform scripts)
+#
+- id: git-command
+  image: vorteil/git:latest
+  type: reusable
+#
+# The Terraform direktiv-app container, which will run the latest Terraform and accept as an
+# input viariable the Terraform script
+#   
+- id: tfrun
+  image: vorteil/terraform:latest
+  type: reusable
+#
+# Post message to Discord using the Discord direktiv-app
+#  
+- id: discordmsg
+  image: vorteil/discordmsg:latest
+  type: reusable
+#
+# BEGIN state definitions
+#   
+states:
+#
+# Clone the terraform scripts in the GitHub repository into an internal variable to be used by the workflow
+#  
+  - id: clone-terraform-examples
+    type: action
+    action:
+      function: git-command
+      input:
+        cmds: ["clone https://github.com/vorteil/terraform-examples.git $out/namespace/terraform_git_var"]
+    transition: deploy-aws
+
+#
+# Deploy the aws terraform script to the terraform container (direktiv-app)
+#  
+  - id: deploy-aws
+    type: action
+    action:
+      files:
+      - key: terraform_git_var
+        scope: namespace
+        type: tar.gz
+      secrets: ["AWS_KEY", "AWS_SECRET"]
+      function: tfrun
+      input:
+        execution-folder: terraform_git_var/amazon
+        action: jq(.action)
+        args-on-init: ["-backend-config=address=http://localhost:8001/awsinstance"]
+        variables:
+          region: ap-southeast-2
+          state-name: awsinstance
+          amazon_key: jq(.secrets.AWS_KEY)
+          amazon_secret: jq(.secrets.AWS_SECRET)
+          key_pair_name: vorteil-jumphost
+    transform: 
+      action: jq(.action)
+      amazon_ip: jq(.return.output."ip-address".value)
+    transition: check_apply_or_destroy
+    log: jq(.)
+
+#
+# Are we applying or destroying the configuration?
+# 
+  - id: check_apply_or_destroy
+    type: switch
+    log: jq(.)
+    conditions:
+    - condition: jq(.action == "apply")
+      transition: send_message
+
+#
+# Send a Discord message with a successful deployment notification
+# 
+  - id: send_message
+    type: action
+    action:
+      secrets: ["DISCORD_WEBHOOK_URL"]
+      function: discordmsg
+      input:
+        tts: false
+        url: jq(.secrets.DISCORD_WEBHOOK_URL)
+        message: The ip address of your Amazon machine is jq(.amazon_ip).
+    transition: return-info
+
+  #
+  # Store the details of the provisioned machine
+  # 
+  - id: return-info
+    type: getter
+    variables:
+    - key: awsinstance
+      scope: workflow
+

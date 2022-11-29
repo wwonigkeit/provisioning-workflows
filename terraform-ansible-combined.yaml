@@ -1,0 +1,170 @@
+# Example workflow: 'Building an AWS machine using Terraform, harden using Ansible and manage using Freshservice'
+# 
+#
+# This workflow will clone the GitHub repository containing the Terraform scripts, build and AWS machine, then clone
+# the Ansible CIS hardening playbooks, roles and configurations and run this playbook against a target
+# 
+# Medium article: https://medium.com/@wilhelm-wonigkeit/direktiv-provision-using-terraform-harden-using-ansible-73f655fb66f8
+#
+# Inputs:
+# {
+#   "action": "apply | destroy"
+#   "ip_address":"3.25.180.180",
+#   "section":"section2",
+#   "user":"ubuntu",
+#   "playbook":"run.yaml"
+# }
+#
+description: "The master workflow calling a terraform build and an ansible CIS hardening playbook"
+functions:
+  - id: request
+    image: direktiv/request:latest
+    type: reusable
+  - id: terraform-build-aws
+    type: subflow
+    workflow: terraform-aws-build:latest
+  - id: ansible-cis-hardening
+    type: subflow
+    workflow: ansible-cis-hardening:latest
+states:
+  - id: build-tf-aws
+    type: action
+    log: 'jq(.)'
+    action:
+      function: terraform-build-aws
+      input:
+        action: 'jq(.action)'
+    transition: apply-destroy
+    transform: 'jq(.terraform = .return | del (.return))'
+    catch:
+    - error: "*"
+      transition: check-error
+#
+#
+# Check if it is apply or destroy
+  - id: apply-destroy
+    type: switch
+    log: jq(.)
+    conditions:
+    - condition: jq(.terraform.action == "apply")
+      transition: create-cmdb
+#
+#
+# Create the instance in the CMDB
+  - id: create-cmdb
+    type: action
+    #log: jq(.)
+    action:
+      secrets: ["FRESH_USERNAME","FRESH_PASSWORD"]
+      function: request
+      input: 
+        method: "POST"
+        url: "https://direktiv.freshservice.com/cmdb/items.json"
+        username: jq(.secrets.FRESH_USERNAME)
+        password: jq(.secrets.FRESH_PASSWORD)
+        headers:
+          "Content-Type": "application/json"
+        body: 'jq({
+          "cmdb_config_item": {
+            "name" : .terraform.var.awsinstance.resources[1].instances[0].attributes.id,
+            "ci_type_id" : "75000270995",
+            "level_field_attributes" : {
+              "aws_region_75000270981" : "ap-southeast-2",
+              "availability_zone_75000270981" : .terraform.var.awsinstance.resources[1].instances[0].attributes.availability_zone,
+              "instance_id_75000270995": .terraform.var.awsinstance.resources[1].instances[0].attributes.id,
+              "instance_type_75000270995": .terraform.var.awsinstance.resources[1].instances[0].attributes.instance_type,
+              "private_ip_75000270995" : .terraform.var.awsinstance.resources[1].instances[0].attributes.private_ip,
+              "private_dns_75000270995" : .terraform.var.awsinstance.resources[1].instances[0].attributes.private_dns,
+              "public_ip_75000270995" : .terraform.var.awsinstance.resources[1].instances[0].attributes.public_ip,
+              "public_dns_75000270995" : .terraform.var.awsinstance.resources[1].instances[0].attributes.public_dns,
+              "instance_state_75000270995" : .terraform.var.awsinstance.resources[1].instances[0].attributes.instance_state
+            }
+          }
+        })'
+    transition: ansible-cis
+    transform: 'jq(del (.return))'
+    catch:
+    - error: "*"
+      transition: check-error
+#
+#
+# Run the ansible sub workflow
+  - id: ansible-cis
+    type: action
+    log: 'jq(.)'
+    action:
+      function: ansible-cis-hardening
+      input:
+        ip_address: 'jq(.terraform.amazon_ip)'
+        section: "section2"
+        user: "ubuntu"
+        playbook: "run.yaml"
+    transition: update-cmdb
+    transform: 'jq(.ansible = .return | del (.return))'
+    catch:
+    - error: "*"
+      transition: check-error
+#
+#
+# Update the instance in the CMDB
+  - id: update-cmdb
+    type: action
+    log: jq(.)
+    action:
+      secrets: ["FRESH_USERNAME","FRESH_PASSWORD"]
+      function: request
+      input: 
+        method: "POST"
+        url: 'jq("https://direktiv.freshservice.com/cmdb/items/" + (.terraform.var.awsinstance.resources[1].instances[0].attributes.id|tostring) + ".json")'
+        username: jq(.secrets.FRESH_USERNAME)
+        password: jq(.secrets.FRESH_PASSWORD)
+        headers: 
+          "Content-Type": "application/json"
+        body: 'jq({
+          "cmdb_config_item": {
+            "name" : .return.body.config_items[0].name,
+            "product_name" : "CIS Hardened Ubuntu"
+          }
+        })'
+    transform: 'jq(.msg = .return.body.item.config_item | del(.return) | del(."EC2 Instance State-change Notification"))'
+    transition: print-state
+    catch:
+    - error: "*"
+      transition: check-error
+#
+#
+# Print machine state
+  - id: print-state
+    type: noop
+    log: 'jq(.)'
+#
+#
+# Log the error
+  - id: check-error
+    type: noop
+    log: 'jq(.error)'
+    transition: create-ticket
+#
+#
+# Create the ticket in Freshservice
+  - id: create-ticket
+    type: action
+    action:
+      secrets: ["FRESH_USERNAME","FRESH_PASSWORD"]
+      function: request
+      input:
+        method: "POST"
+        url: 'jq("https://direktiv.freshservice.com//helpdesk/tickets.json")'
+        username: jq(.secrets.FRESH_USERNAME)
+        password: jq(.secrets.FRESH_PASSWORD)
+        headers:
+          "Content-Type": "application/json"
+        body: 'jq({
+          "helpdesk_ticket": {
+            "description": .error.msg,
+            "subject": .error.code,
+            "email": .secrets.FRESH_USERNAME,
+            "priority":1, "status":2, "source":2,"ticket_type":"Incident"
+           }
+         })'
+            

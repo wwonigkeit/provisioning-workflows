@@ -1,0 +1,120 @@
+################################################################################
+#
+# This workflow is used to provision new users in Keycloak. The username and
+# password combination is set, as well as metadata (email address) and forces the
+# user to change the password at next logon. It also forces the user to 
+# verify their email address. All these options are configurable.
+#
+# Inputs:
+#   direktivurl: Direktiv URL, with the /auth realm appended to access the Keycloak API
+#   username: Username to provision
+#   password: Password for the username
+#   email: Email used for user verification and password reset
+#   namespace: Group to be created in Keycloak and Direktiv
+#
+# Secrets:
+#   KEYCLOAK_ADMIN_USER:     Keycloak admin user for realm management (NOTE: t
+#                            his is different to the Direktiv administrator!)
+#   KEYCLOAK_ADMIN_PASSWORD: Keycloak admin password
+#
+description: This workflows creates a Keycloak user
+
+#
+# The start definition which starts the worklfow based on the event received from the
+# previous workflow. Example of the event is shown above in the description
+#
+start:
+  type: event
+  state: create-keycloak-token
+  event:
+    type: com.direktiv.user.create
+
+functions:
+- id: get-request
+  image: direktiv/request:latest
+  type: knative-workflow
+
+states:
+  # Generate a Keycloak token using the Keycloak username and password (admin)
+  # The username and password are stored as secrets on the namespace level
+  - id: create-keycloak-token
+    type: action
+    action:
+      function: get-request
+      secrets: ["KEYCLOAK_ADMIN_USER","KEYCLOAK_ADMIN_PASSWORD"]
+      input: 
+        method: "POST"
+        url: 'jq(."com.direktiv.user.create".data.direktivurl)/auth/realms/master/protocol/openid-connect/token'  
+        headers:
+          "Content-Type": "application/x-www-form-urlencoded"
+        body: |
+          grant_type=password&client_id=admin-cli&username=jq(.secrets.KEYCLOAK_ADMIN_USER)&password=jq(.secrets.KEYCLOAK_ADMIN_PASSWORD)
+        insecureSkipVerify: true
+    catch:
+      - error: "*"
+        transition: generate-error-event
+    transform: jq(.token = .return.body.access_token | del(.return))
+    transition: create-keycloak-group
+
+  - id: create-keycloak-group
+    type: action
+    action:
+      function: get-request
+      input:
+        method: "POST"
+        url: 'jq(."com.direktiv.user.create".data.direktivurl)/auth/admin/realms/direktiv/groups'
+        headers:
+          "Content-Type": "application/json"
+          "Authorization": "Bearer jq(.token)"
+        body:
+          "name": jq(."com.direktiv.user.create".data.namespace)
+    catch:
+      - error: "*"
+        transition: generate-error-event          
+    transition: create-keycloak-user
+
+  - id: create-keycloak-user
+    type: action
+    action:
+      function: get-request
+      input:
+        method: "POST"
+        url: 'jq(."com.direktiv.user.create".data.direktivurl)/auth/admin/realms/direktiv/users'
+        headers:
+          "Content-Type": "application/json"
+          "Authorization": "Bearer jq(.token)"
+        body:
+          "username": jq(."com.direktiv.user.create".data.username)
+          "enabled": true
+          "emailVerified": false
+          #"firstname": jq(.firstname)
+          #"lastname": jq(.lastname)
+          "email": jq(."com.direktiv.user.create".data.email)
+          "groups": [jq(."com.direktiv.user.create".data.namespace)]
+          "credentials":
+            - "type": "password"
+              "value": jq(."com.direktiv.user.create".data.password) 
+              "temporary" : true
+    catch:
+      - error: "*"
+        transition: generate-error-event
+    transition: generate-success-event
+    transform: jq(. =."com.direktiv.user.create".data)
+
+  # Generate a generic handle error event
+  - id: generate-error-event
+    type: generateEvent
+    log: Create a generic handle error event
+    event: 
+      type: com.direktiv.user.error
+      source: direktiv-user-setup/keycloak-create-user
+      data: jq(.)
+
+  # Generate a create user success event
+  - id: generate-success-event
+    type: generateEvent
+    log: Generate a create user success event
+    event: 
+      type: com.direktiv.user.success
+      source: direktiv-user-setup/keycloak-create-user
+      data: jq(.)

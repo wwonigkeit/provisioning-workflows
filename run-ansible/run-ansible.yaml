@@ -1,0 +1,66 @@
+# Example workflow: 'Running Ansible CIS Hardening Playbooks'
+# 
+#
+# This workflow will clone the GitHub repository containing the
+# Ansible playbooks, roles and configurations and run this
+# playbook against a target
+#
+#
+# GitHub Repo: https://github.com/wwonigkeit/Direktiv-CIS-Ubuntu-20.04-Ansible.git
+#
+# Inputs:
+# {
+#   "section":"section2",
+#   "user":"ubuntu",
+#   "playbook":"run.yaml"
+# }
+# 
+#
+description: CIS Hardening using Ansible for an Ubuntu 20.04 machine
+functions:
+- id: git-command
+  image: direktiv/git:latest
+  type: reusable
+- id: ansible
+  image: direktiv/ansible:latest
+  type: reusable
+states:
+  - id: clone-ansible-cis-hardening
+    type: action
+    action:
+      function: git-command
+      input:
+        cmds: 
+          - jq("clone https://github.com/wwonigkeit/Direktiv-CIS-Ubuntu-20.04-Ansible.git $out/workflow/ansible_cis_var")
+    transition: print-debug
+  - id: print-debug
+    type: noop
+    log: 'jq(.)'
+    transition: run-ansible
+  - id: run-ansible
+    type: action
+    log: 'jq(.)'
+    action:
+      files:
+      - key: vorteil_jumphost_pem
+        scope: workflow
+      - key: ansible_cis_var
+        scope: workflow
+        type: tar.gz
+      function: ansible
+      input:
+        playbook: jq("ansible_cis_var/" + .playbook)
+        privateKey: vorteil_jumphost_pem
+        args:
+          - "-i"
+          - jq(.ip_address + ",")
+          - "-t"
+          - jq(.section)
+          - "-u"
+          - jq(.user)
+          - "--ssh-common-args"
+          - "'-o StrictHostKeyChecking=no'"
+    transition: pretty-print
+    transform: jq( .return | del (.return))
+  - id: pretty-print
+    type: noop
